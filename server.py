@@ -31,7 +31,8 @@ load_dotenv()
 # Sensitive values now pulled from .env via os.environ
 API_KEY         = os.environ["API_KEY"]
 MOVIE_DB_ENDPOINT = "https://api.themoviedb.org/3/search/movie"
-
+MOVIE_DB_DETAILS_ENDPOINT = "https://api.themoviedb.org/3/movie"
+MOVIE_DB_IMAGE_URL = "https://image.tmdb.org/t/p/w500"
 
 
 app = Flask(__name__)
@@ -60,7 +61,7 @@ class Movie(db.Model):
 
     year: Mapped[int] = mapped_column(
         Integer,
-        nullable=False
+        nullable=True
     )
 
     description: Mapped[str] = mapped_column(
@@ -126,15 +127,51 @@ class FindMovieForm(FlaskForm):
 #     db.session.add(second_movie)
 #     db.session.commit()
 
-# Edit a movie rating and review
+
+# test this function with mock_response (revisit the Claude chat)
+@app.route("/find_movie/<int:movie_id>")
+def find_movie(movie_id):
+    headers = {"accept": "application/json", "Authorization": f"Bearer {API_KEY}"}
+    response = requests.get(f"{MOVIE_DB_DETAILS_ENDPOINT}/{movie_id}", headers=headers)
+    data = response.json()
+
+    release_date = data.get("release_date")
+    # The data in release_date includes month and day, we will want to get rid of.
+    year = int(release_date.split("-")[0]) if release_date else None
+
+    poster_path = data.get("poster_path")
+    img_url = f"{MOVIE_DB_IMAGE_URL}{poster_path}" if poster_path else None
+
+    # use .get() for fields you know can legitimately be absent and you're okay
+    # defaulting to None; use [...] for fields that should always be present,
+    # where a missing key signals a real bug you want to know about immediately.
+    new_movie = Movie(
+        title=data["title"],
+        year=year,
+        description=data.get("overview"),
+        img_url=img_url,
+    )
+    db.session.add(new_movie)
+    db.session.commit()
+    # Redirect to /edit route
+    return redirect(url_for("rate_movie",id=new_movie.id))
+
+
+# Edit a movie's rating and review
 @app.route('/edit/<int:id>', methods=["GET", "POST"])
 def rate_movie(id):
     form = RateMovieForm()
     movie = db.get_or_404(Movie, id)
     if form.validate_on_submit():
-        movie.rating = float(form.rating.data)
-        movie.review = form.review.data
-        db.session.commit()
+        new_rating = float(form.rating.data)
+        new_review = form.review.data
+
+        # Only touch the DB if something actually changed
+        if new_rating != movie.rating or new_review != movie.review:
+            movie.rating = new_rating
+            movie.review = new_review
+            db.session.commit()
+
         return redirect(url_for('home'))
     return render_template("edit.html", movie=movie, form=form)
 
@@ -168,12 +205,19 @@ def add_movie():
 
 @app.route("/")
 def home():
-    # # READ ALL RECORDS
+    # # READ ALL RECORDS, lowest rating first
         result = db.session.execute(
-            db.select(Movie)
+            db.select(Movie).order_by(Movie.rating)
         )
         # all_movies = result.scalars() doesn't immediately create a list. Need to add all()
         all_movies = result.scalars().all()
+
+        # The list is ordered lowest rating -> highest rating, so the last
+        # movie in the list is the best one, and should get ranking 1.
+        for i in range(len(all_movies)):
+            all_movies[i].ranking = len(all_movies) - i
+        db.session.commit()
+
         return render_template("index.html", movies=all_movies)
 
 
